@@ -1,6 +1,7 @@
 import streamlit as st
 import cv2
 import numpy as np
+import pandas as pd
 from PIL import Image, ExifTags
 from ultralytics import YOLO
 import folium
@@ -9,9 +10,7 @@ import tempfile
 import random
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Road Damage Mapper Pro", layout="wide", page_icon="🛣️")
-st.title("🛣️ Automated Road Damage Mapper (Pro Version)")
-st.markdown("Upload a road image or dashcam video to detect damage and extract geospatial data.")
+st.set_page_config(page_title="Infrastructure AI Mapper", layout="wide", page_icon="🛣️")
 
 # --- LOAD AI MODEL ---
 @st.cache_resource
@@ -20,19 +19,8 @@ def load_model():
 
 model = load_model()
 
-# --- HELPER: GPS EXTRACTION ---
-def get_decimal_coordinates(info):
-    # Converts EXIF Degree/Minute/Second format into Decimal format
-    for key in ['Latitude', 'Longitude']:
-        if 'GPS'+key in info and 'GPS'+key+'Ref' in info:
-            e = info['GPS'+key]
-            ref = info['GPS'+key+'Ref']
-            d = e[0] + (e[1] / 60.0) + (e[2] / 3600.0)
-            if ref in ['S', 'W']:
-                d = -d
-            return d
-    return None
-
+# --- HELPER FUNCTIONS ---
+# (Keeping the exact same GPS extraction functions we built earlier)
 def extract_gps_from_image(image):
     try:
         exif = image._getexif()
@@ -44,12 +32,10 @@ def extract_gps_from_image(image):
                     for t in val:
                         sub_decoded = ExifTags.GPSTAGS.get(t, t)
                         gps_info[sub_decoded] = val[t]
-            
             lat = gps_info.get('GPSLatitude')
             lat_ref = gps_info.get('GPSLatitudeRef')
             lon = gps_info.get('GPSLongitude')
             lon_ref = gps_info.get('GPSLongitudeRef')
-            
             if lat and lon and lat_ref and lon_ref:
                 lat_d = lat[0] + (lat[1]/60.0) + (lat[2]/3600.0)
                 lon_d = lon[0] + (lon[1]/60.0) + (lon[2]/3600.0)
@@ -60,8 +46,22 @@ def extract_gps_from_image(image):
         pass
     return None, None
 
-# --- UPLOADER (Image or Video) ---
-uploaded_file = st.file_uploader("Upload Dashcam Video (.mp4) or Image (.jpg)", type=["jpg", "jpeg", "png", "mp4"])
+# --- SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.title("⚙️ Control Panel")
+    st.markdown("Upload infrastructure survey data below.")
+    uploaded_file = st.file_uploader("Upload Dashcam Video (.mp4) or Image (.jpg)", type=["jpg", "jpeg", "png", "mp4"])
+    
+    st.markdown("---")
+    # Add a professional slider to let the user control how strict the AI is
+    conf_threshold = st.slider("AI Confidence Threshold", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
+    
+    st.markdown("---")
+    st.caption("Developed for Infrastructure Maintenance")
+
+# --- MAIN DASHBOARD AREA ---
+st.title("🛣️ Automated Road Damage Mapper")
+st.markdown("Geospatial infrastructure monitoring powered by YOLOv8 Computer Vision.")
 
 if uploaded_file is not None:
     file_type = uploaded_file.name.split('.')[-1].lower()
@@ -70,23 +70,19 @@ if uploaded_file is not None:
     
     with st.spinner("AI is analyzing the infrastructure..."):
         
-        # ==========================================
-        # 🟢 IMAGE PROCESSING LOGIC
-        # ==========================================
+        # --- IMAGE LOGIC ---
         if file_type in ['jpg', 'jpeg', 'png']:
             image = Image.open(uploaded_file)
             img_array = np.array(image)
             
-            # Extract real GPS, or fallback to simulation
             real_lat, real_lon = extract_gps_from_image(image)
             if real_lat and real_lon:
                 base_lat, base_lon = real_lat, real_lon
-                st.success("✅ Real GPS metadata extracted from image.")
             else:
                 base_lat, base_lon = 26.2483, 68.4096 # Nawabshah Fallback
-                st.warning("⚠️ No GPS metadata found. Simulating location.")
 
-            results = model(img_array)
+            # Pass the user's slider value to the model
+            results = model(img_array, conf=conf_threshold) 
             annotated_img = results[0].plot()
             frames_with_damage.append(annotated_img)
             
@@ -94,75 +90,87 @@ if uploaded_file is not None:
                 lat = base_lat + random.uniform(-0.005, 0.005)
                 lon = base_lon + random.uniform(-0.005, 0.005)
                 detections.append({
-                    "type": model.names[int(box.cls[0])],
-                    "conf": float(box.conf[0]),
-                    "lat": lat, "lon": lon
+                    "Damage Type": model.names[int(box.cls[0])].upper(),
+                    "Confidence": float(box.conf[0]),
+                    "Latitude": lat, 
+                    "Longitude": lon
                 })
 
-        # ==========================================
-        # 🔵 VIDEO PROCESSING LOGIC
-        # ==========================================
+        # --- VIDEO LOGIC ---
         elif file_type == 'mp4':
-            st.info("Processing video frame by frame. This may take a moment...")
             tfile = tempfile.NamedTemporaryFile(delete=False)
             tfile.write(uploaded_file.read())
-            
             cap = cv2.VideoCapture(tfile.name)
             fps = int(cap.get(cv2.CAP_PROP_FPS))
             frame_count = 0
-            
-            # Simulated base for video route
             base_lat, base_lon = 26.2483, 68.4096 
             
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
-                
-                # Analyze 1 frame every second to save time
                 if frame_count % fps == 0:
-                    results = model(frame)
-                    
+                    results = model(frame, conf=conf_threshold)
                     if len(results[0].boxes) > 0:
-                        # Convert BGR to RGB for Streamlit
                         rgb_frame = cv2.cvtColor(results[0].plot(), cv2.COLOR_BGR2RGB)
                         frames_with_damage.append(rgb_frame)
-                        
                         for box in results[0].boxes:
-                            # Move the GPS coordinate slightly to simulate a moving car
                             base_lat += 0.0005 
                             base_lon += 0.0005
                             detections.append({
-                                "type": model.names[int(box.cls[0])],
-                                "conf": float(box.conf[0]),
-                                "lat": base_lat, "lon": base_lon
+                                "Damage Type": model.names[int(box.cls[0])].upper(),
+                                "Confidence": float(box.conf[0]),
+                                "Latitude": base_lat, "Longitude": base_lon
                             })
                 frame_count += 1
             cap.release()
 
-    # --- DASHBOARD DISPLAY ---
-    st.markdown("---")
-    col1, col2 = st.columns(2)
+    # --- RENDER KPI METRICS ---
+    st.markdown("### 📊 Survey Summary")
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.subheader(f"📷 Damage Detected ({len(detections)} issues)")
-        if len(frames_with_damage) > 0:
-            # Show the first frame where damage was found
-            st.image(frames_with_damage[0], use_container_width=True)
-            if len(frames_with_damage) > 1:
-                st.caption(f"+ {len(frames_with_damage)-1} more frames with damage (Data logged to map)")
-        else:
-            st.success("No road damage detected!")
-            
+        st.metric(label="Total Issues Detected", value=len(detections))
     with col2:
-        st.subheader("📍 Geospatial Damage Map")
+        avg_conf = sum(d['Confidence'] for d in detections) / len(detections) if detections else 0
+        st.metric(label="Average AI Confidence", value=f"{avg_conf:.0%}")
+    with col3:
+        status = "Needs Maintenance" if len(detections) > 0 else "Clear"
+        st.metric(label="Overall Status", value=status)
+
+    st.markdown("---")
+
+    # --- RENDER TABS ---
+    tab1, tab2, tab3 = st.tabs(["📍 Geospatial Map", "📸 Visual Analysis", "📋 Raw Data Log"])
+    
+    with tab1:
         if len(detections) > 0:
-            map_center = [detections[0]['lat'], detections[0]['lon']]
+            map_center = [detections[0]['Latitude'], detections[0]['Longitude']]
             m = folium.Map(location=map_center, zoom_start=15)
-            
             for d in detections:
                 folium.Marker(
-                    [d['lat'], d['lon']],
-                    popup=f"{d['type'].upper()} (Conf: {d['conf']:.2f})",
-                    icon=folium.Icon(color="red", icon="info-sign")
+                    [d['Latitude'], d['Longitude']],
+                    popup=f"{d['Damage Type']} ({d['Confidence']:.2f})",
+                    icon=folium.Icon(color="red", icon="wrench", prefix='fa') # Changed to a professional wrench icon
                 ).add_to(m)
-            st_folium(m, width=700, height=500)
+            st_folium(m, width=1000, height=500)
+        else:
+            st.success("The area is clear. No markers to display.")
+            
+    with tab2:
+        if len(frames_with_damage) > 0:
+            st.image(frames_with_damage[0], use_container_width=True)
+            if len(frames_with_damage) > 1:
+                st.caption(f"Note: {len(frames_with_damage)-1} additional damaged frames were logged.")
+        else:
+            st.info("No damaged frames to display.")
+            
+    with tab3:
+        if len(detections) > 0:
+            # Convert dictionary list to a Pandas DataFrame for a clean table
+            df = pd.DataFrame(detections)
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No data logged.")
+else:
+    # What the user sees before uploading a file
+    st.info("👈 Please upload an image or video from the sidebar to begin analysis.")
