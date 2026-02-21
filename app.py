@@ -5,12 +5,15 @@ import pandas as pd
 from PIL import Image, ExifTags
 from ultralytics import YOLO
 import folium
+from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 import tempfile
 import random
+import plotly.express as px
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Infrastructure AI Mapper", layout="wide", page_icon="🛣️")
+
 
 # --- LOAD AI MODEL ---
 @st.cache_resource
@@ -20,7 +23,6 @@ def load_model():
 model = load_model()
 
 # --- HELPER FUNCTIONS ---
-# (Keeping the exact same GPS extraction functions we built earlier)
 def extract_gps_from_image(image):
     try:
         exif = image._getexif()
@@ -48,16 +50,15 @@ def extract_gps_from_image(image):
 
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
-    st.title("⚙️ Control Panel")
+    st.title("⚙️ System Controls")
     st.markdown("Upload infrastructure survey data below.")
     uploaded_file = st.file_uploader("Upload Dashcam Video (.mp4) or Image (.jpg)", type=["jpg", "jpeg", "png", "mp4"])
     
     st.markdown("---")
-    # Add a professional slider to let the user control how strict the AI is
     conf_threshold = st.slider("AI Confidence Threshold", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
     
     st.markdown("---")
-    st.caption("Developed for Infrastructure Maintenance")
+    st.caption("ITSOLERA Internship Project | Computer Vision Division")
 
 # --- MAIN DASHBOARD AREA ---
 st.title("🛣️ Automated Road Damage Mapper")
@@ -79,9 +80,8 @@ if uploaded_file is not None:
             if real_lat and real_lon:
                 base_lat, base_lon = real_lat, real_lon
             else:
-                base_lat, base_lon = 26.2483, 68.4096 # Nawabshah Fallback
+                base_lat, base_lon = 26.2483, 68.4096 # Fallback Coordinates
 
-            # Pass the user's slider value to the model
             results = model(img_array, conf=conf_threshold) 
             annotated_img = results[0].plot()
             frames_with_damage.append(annotated_img)
@@ -140,23 +140,34 @@ if uploaded_file is not None:
     st.markdown("---")
 
     # --- RENDER TABS ---
-    tab1, tab2, tab3 = st.tabs(["📍 Geospatial Map", "📸 Visual Analysis", "📋 Raw Data Log"])
+    tab1, tab2, tab3 = st.tabs(["📍 Geospatial Map", "📸 Visual Analysis", "📊 Analytics & Export"])
     
     with tab1:
+        st.subheader("Interactive Damage Heatmap & Markers")
         if len(detections) > 0:
             map_center = [detections[0]['Latitude'], detections[0]['Longitude']]
+            # Removed the custom CartoDB tileset to ensure standard loading
             m = folium.Map(location=map_center, zoom_start=15)
+            
+            # Simplified Heatmap data so it doesn't crash the browser renderer
+            heat_data = [[d['Latitude'], d['Longitude']] for d in detections]
+            HeatMap(heat_data, radius=15, blur=10).add_to(m)
+            
+            # Add Individual Markers
             for d in detections:
                 folium.Marker(
                     [d['Latitude'], d['Longitude']],
                     popup=f"{d['Damage Type']} ({d['Confidence']:.2f})",
-                    icon=folium.Icon(color="red", icon="wrench", prefix='fa') # Changed to a professional wrench icon
+                    icon=folium.Icon(color="red", icon="info-sign") 
                 ).add_to(m)
-            st_folium(m, width=1000, height=500)
+                
+            # Changed width to 700 and added returned_objects=[] to prevent blanking
+            st_folium(m, width=700, height=500, returned_objects=[])
         else:
             st.success("The area is clear. No markers to display.")
             
     with tab2:
+        st.subheader("AI Vision Verification")
         if len(frames_with_damage) > 0:
             st.image(frames_with_damage[0], use_container_width=True)
             if len(frames_with_damage) > 1:
@@ -165,12 +176,36 @@ if uploaded_file is not None:
             st.info("No damaged frames to display.")
             
     with tab3:
+        st.subheader("Data Distribution & Export")
         if len(detections) > 0:
-            # Convert dictionary list to a Pandas DataFrame for a clean table
             df = pd.DataFrame(detections)
-            st.dataframe(df, use_container_width=True)
+            
+            col_chart, col_data = st.columns([1.5, 1])
+            
+            with col_chart:
+                damage_counts = df['Damage Type'].value_counts().reset_index()
+                damage_counts.columns = ['Damage Type', 'Count']
+                fig = px.bar(
+                    damage_counts, 
+                    x='Damage Type', 
+                    y='Count', 
+                    color='Damage Type',
+                    title="Detected Issues Breakdown",
+                    template="plotly_white"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+            with col_data:
+                st.dataframe(df, use_container_width=True, height=250)
+                csv_data = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download CSV Report",
+                    data=csv_data,
+                    file_name="infrastructure_damage_report.csv",
+                    mime="text/csv",
+                    type="primary"
+                )
         else:
-            st.info("No data logged.")
+            st.info("No data logged. Run an analysis to generate reports.")
 else:
-    # What the user sees before uploading a file
-    st.info("👈 Please upload an image or video from the sidebar to begin analysis.")
+    st.info("👈 Please upload a road image or dashcam video from the sidebar to begin the AI analysis.")
