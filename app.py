@@ -10,10 +10,39 @@ from streamlit_folium import st_folium
 import tempfile
 import random
 import plotly.express as px
+import sqlite3
+from datetime import datetime
+
+# --- DATABASE SETUP ---
+# This creates a file called 'road_data.db' in your folder if it doesn't exist
+conn = sqlite3.connect('road_data.db', check_same_thread=False)
+c = conn.cursor()
+
+# Create a table to permanently store our findings
+c.execute('''
+    CREATE TABLE IF NOT EXISTS damage_logs (
+        timestamp TEXT,
+        damage_type TEXT,
+        confidence REAL,
+        latitude REAL,
+        longitude REAL
+    )
+''')
+conn.commit()
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Infrastructure AI Mapper", layout="wide", page_icon="🛣️")
 
+# --- ENTERPRISE BRANDING & CSS ---
+hide_streamlit_style = """
+            <style>
+            /* Hide the default Streamlit menu and footer ONLY */
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # --- LOAD AI MODEL ---
 @st.cache_resource
@@ -50,15 +79,16 @@ def extract_gps_from_image(image):
 
 # --- SIDEBAR CONTROLS ---
 with st.sidebar:
+    st.markdown("### 🏢 ITSOLERA")
+    st.caption("Computer Vision & Infrastructure Division")
+    st.markdown("---")
+    
     st.title("⚙️ System Controls")
-    st.markdown("Upload infrastructure survey data below.")
-    uploaded_file = st.file_uploader("Upload Dashcam Video (.mp4) or Image (.jpg)", type=["jpg", "jpeg", "png", "mp4"])
+    uploaded_file = st.file_uploader("Upload Survey Data (.mp4, .jpg)", type=["jpg", "jpeg", "png", "mp4"])
     
     st.markdown("---")
+    # THE MISSING SLIDER IS NOW BACK:
     conf_threshold = st.slider("AI Confidence Threshold", min_value=0.1, max_value=1.0, value=0.25, step=0.05)
-    
-    st.markdown("---")
-    st.caption("ITSOLERA Internship Project | Computer Vision Division")
 
 # --- MAIN DASHBOARD AREA ---
 st.title("🛣️ Automated Road Damage Mapper")
@@ -95,6 +125,13 @@ if uploaded_file is not None:
                     "Latitude": lat, 
                     "Longitude": lon
                 })
+                # Get the current time
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Save to Database
+                c.execute("INSERT INTO damage_logs VALUES (?, ?, ?, ?, ?)", 
+                          (now, model.names[int(box.cls[0])].upper(), float(box.conf[0]), lat, lon))
+                conn.commit()
 
         # --- VIDEO LOGIC ---
         elif file_type == 'mp4':
@@ -121,6 +158,13 @@ if uploaded_file is not None:
                                 "Confidence": float(box.conf[0]),
                                 "Latitude": base_lat, "Longitude": base_lon
                             })
+                            # Get the current time
+                            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            # Save to Database
+                            c.execute("INSERT INTO damage_logs VALUES (?, ?, ?, ?, ?)", 
+                                      (now, model.names[int(box.cls[0])].upper(), float(box.conf[0]), base_lat, base_lon))
+                            conn.commit()
                 frame_count += 1
             cap.release()
 
@@ -140,20 +184,17 @@ if uploaded_file is not None:
     st.markdown("---")
 
     # --- RENDER TABS ---
-    tab1, tab2, tab3 = st.tabs(["📍 Geospatial Map", "📸 Visual Analysis", "📊 Analytics & Export"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📍 Geospatial Map", "📸 Visual Analysis", "📊 Analytics & Export", "🗄️ Historical Database"])
     
     with tab1:
         st.subheader("Interactive Damage Heatmap & Markers")
         if len(detections) > 0:
             map_center = [detections[0]['Latitude'], detections[0]['Longitude']]
-            # Removed the custom CartoDB tileset to ensure standard loading
             m = folium.Map(location=map_center, zoom_start=15)
             
-            # Simplified Heatmap data so it doesn't crash the browser renderer
             heat_data = [[d['Latitude'], d['Longitude']] for d in detections]
             HeatMap(heat_data, radius=15, blur=10).add_to(m)
             
-            # Add Individual Markers
             for d in detections:
                 folium.Marker(
                     [d['Latitude'], d['Longitude']],
@@ -161,7 +202,6 @@ if uploaded_file is not None:
                     icon=folium.Icon(color="red", icon="info-sign") 
                 ).add_to(m)
                 
-            # Changed width to 700 and added returned_objects=[] to prevent blanking
             st_folium(m, width=700, height=500, returned_objects=[])
         else:
             st.success("The area is clear. No markers to display.")
@@ -179,7 +219,6 @@ if uploaded_file is not None:
         st.subheader("Data Distribution & Export")
         if len(detections) > 0:
             df = pd.DataFrame(detections)
-            
             col_chart, col_data = st.columns([1.5, 1])
             
             with col_chart:
@@ -207,5 +246,19 @@ if uploaded_file is not None:
                 )
         else:
             st.info("No data logged. Run an analysis to generate reports.")
+            
+    with tab4:
+        st.subheader("Permanent Database Records")
+        st.markdown("This table pulls directly from the SQLite database, showing all historical detections across all sessions.")
+        df_history = pd.read_sql_query("SELECT * FROM damage_logs", conn)
+        
+        if not df_history.empty:
+            st.dataframe(df_history, use_container_width=True)
+            if st.button("⚠️ Clear Historical Database"):
+                c.execute("DELETE FROM damage_logs")
+                conn.commit()
+                st.rerun()
+        else:
+            st.info("The database is currently empty.")
 else:
     st.info("👈 Please upload a road image or dashcam video from the sidebar to begin the AI analysis.")
